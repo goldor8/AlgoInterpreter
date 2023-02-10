@@ -6,11 +6,12 @@ if (args.Length >= 1)
 {
     Console.WriteLine("Interpreting " + args[0] +"...");    
     Token.InitTokenFactoryRegistry();
-    List<List<Token>> tokens = Lexer.TokenizeFile(args[0]);
+    Token[] tokens = Lexer.TokenizeFile(args[0]);
     List<Node> bigTree = new List<Node>();
-    foreach (List<Token> tokenList in tokens)
+    Token[][] linesTokens = Token.SplitTokens(tokens);
+    foreach (Token[] line in linesTokens)
     {
-        Node lineNode = NodeConverter.CreateNodeTree(tokenList.ToArray());
+        Node lineNode = NodeConverter.CreateNodeTree(line);
         if(lineNode != null)
         {
             bigTree.Add(lineNode);

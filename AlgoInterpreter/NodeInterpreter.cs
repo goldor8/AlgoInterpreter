@@ -19,7 +19,7 @@ public class NodeInterpreter
 
     private void InitFunction()
     {
-        functionRegistry.Add("Afficher", (Node[] arguments) =>
+        functionRegistry.Add("Afficher", arguments =>
         {
             string[] values = new string[arguments.Length];
             for (var i = 0; i < arguments.Length; i++)
@@ -28,6 +28,55 @@ public class NodeInterpreter
             }
 
             Console.WriteLine(string.Join(" ", values));
+        });
+        functionRegistry.Add("Saisir", arguments =>
+        {
+            if(arguments.Length != 1)
+                throw new Exception("Saisir() takes only one argument");
+            if (arguments[0].Token is VariableToken variableToken)
+            {
+                Type variableType = GetVariableType(variableToken.Value as string);
+                if(variableType == typeof(int))
+                {
+                    int value = int.Parse(Console.ReadLine());
+                    registry[variableToken.Value as string] = value;
+                }
+                else if(variableType == typeof(string))
+                {
+                    string value = Console.ReadLine();
+                    registry[variableToken.Value as string] = value;
+                }
+                else if(variableType == typeof(bool))
+                {
+                    bool value = Lexer.ParseBoolean(Console.ReadLine());
+                    registry[variableToken.Value as string] = value;
+                }
+                else
+                {
+                    throw new Exception("Type not supported");
+                }
+            }
+        });
+        functionRegistry.Add("longueur", arguments =>
+        {
+            if (arguments.Length != 1)
+                throw new Exception("longueur() takes only one argument");
+            if (arguments[0].Token is VariableToken variableToken)
+            {
+                object variable = GetVariable(variableToken.Value as string);
+                if (variable is string str)
+                {
+                    stack.Push(str.Length);
+                }
+                else if(variable is Array array)
+                {
+                    stack.Push(array.Length);
+                }
+                else
+                {
+                    throw new Exception("Type not supported");
+                }
+            }
         });
     }
     
@@ -204,15 +253,38 @@ public class NodeInterpreter
         throw new Exception($"Undeclared variable '{varName}'");
     }
     
+    public Type GetVariableType(string varName)
+    {
+        if (typeRegistry.ContainsKey(varName))
+        {
+            return typeRegistry[varName];
+        }
+
+        throw new Exception($"Undeclared variable type '{varName}'");
+    }
+    
     public object GetVariableArray(string varName, int[] dimensions)
     {
         object array = GetVariable(varName);
+        
+        if(array is string str)
+        {
+            if(dimensions.Length != 1) throw new Exception("String can only have one dimension");
+            return str[dimensions[0] - 1];
+        }
+        
         for (int i = 0; i < dimensions.Length; i++)
         {
             array = (array as object[])[dimensions[i] - 1];//minus 1 because in algo array start at 1
         }
 
         return array;
+    }
+    
+    public object GetVariable(VariableToken variableToken)
+    {
+        if(variableToken.DimensionsTokens.Count == 0) return GetVariable(variableToken.Value as string);
+        return GetVariableArray(variableToken.Value as string, variableToken.Dimensions.Select(dimensionNode => (int) ExtractValue(dimensionNode)).ToArray());
     }
 
     public void Push(object value)
@@ -238,6 +310,39 @@ public class NodeInterpreter
             return typeToken.Type;
         }
         return GetAlgoType(token.Value as string);
+    }
+
+    public static TypeToken GetAlgoType(Token[] tokens)
+    {
+        if(tokens.Length == 1)
+        {
+            return new TypeToken(GetAlgoType(tokens[0].Value as string));
+        }
+        if (tokens.Length == 3)
+        {
+            if(tokens[1].Value as string != "de") throw new ArgumentException("Invalid type declaration");
+            switch (tokens[0].Value as string)
+            {
+                case "chaine":
+                case "chaîne":
+                    switch (tokens[2].Value as string)
+                    {
+                        case "caractères":
+                        case "caracteres":
+                        case "caractère":
+                        case "caractere":
+                            return new TypeToken(GetAlgoType("string"));
+                        default:
+                            throw new ArgumentException("Invalid type declaration");
+                    }
+                case "tableau":
+                    TypeToken typeToken = new TypeToken(GetAlgoType(tokens[2].Value as string));
+                    typeToken.IsArray = true;
+                    return typeToken;
+            }
+        }
+        
+        throw new Exception("Type declaration is not valid");
     }
 
     public static Type GetAlgoType(string typeName)
@@ -282,16 +387,20 @@ public class NodeInterpreter
         switch (value.Token.Type)
         {
             case Token.TokenType.Operator:
+            case Token.TokenType.Function:
                 (value.Token as INodeConverter).ExecuteNode(value, this);
                 return Pop();
             case Token.TokenType.Number:
                 return NumberToken.ParseIntOrFloat(value.Token.Value as string);
             case Token.TokenType.Variable:
-                return GetVariable(value.Token.Value as string);
+                VariableToken variableToken = value.Token as VariableToken;
+                return GetVariable(variableToken);
             case Token.TokenType.String:
                 return value.Token.Value;
             case Token.TokenType.Boolean:
                 return (bool) value.Token.Value;
+            case Token.TokenType.Group:
+                return ExtractValue(value.Children[0]);
             default:
                 throw new Exception($"Unable to extract value of type {value.Token.Type}");
         }

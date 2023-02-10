@@ -24,9 +24,9 @@ public class Lexer
         "Fin"
     };
 
-    public static List<List<Token>> TokenizeFile(string path)
+    public static Token[] TokenizeFile(string path)
     {
-        List<List<Token>> tokens = new List<List<Token>>();
+        List<Token> tokens = new List<Token>();
         FileStream fileStream = new FileStream(path, FileMode.Open);
         StreamReader streamReader = new StreamReader(fileStream);
         string? line = streamReader.ReadLine();
@@ -37,14 +37,15 @@ public class Lexer
             Console.WriteLine(SerializeTokens(lineTokens));
             if (lineTokens != null && lineTokens.Count > 0)
             {
-                tokens.Add(lineTokens);
+                tokens.AddRange(lineTokens);
             }
             
             line = streamReader.ReadLine();
         }
         streamReader.Close();
         fileStream.Close();
-        return tokens;
+        
+        return new NewTokenLineBuilder().Build(tokens);
     }
 
     private static string SerializeTokens(List<Token> tokens)
@@ -66,13 +67,13 @@ public class Lexer
             if(words[i] == " ") continue;
             if(isTextDelimiter(words[i]))
             {
-                lineTokens.Add(new Token(Token.TokenType.Separator,words[i]));
+                lineTokens.Add(Token.CreateToken(Token.TokenType.Separator,words[i]));
             }
             else if(IsString(words[i]))
             {
                 lineTokens.Add(new StringToken(words[i]));
             }
-            else if (Syntax.keywords.Contains(words[i]))
+            else if (Syntax.keywords.Contains(words[i].ToLower()))
             {
                 lineTokens.Add(Token.CreateToken(Token.TokenType.Keyword, words[i]));
             }
@@ -84,9 +85,13 @@ public class Lexer
             {
                 lineTokens.Add(Token.CreateToken(Token.TokenType.Operator, words[i]));
             }
+            else if (IsBooleanOperator(words[i]))
+            {
+                lineTokens.Add(Token.CreateToken(Token.TokenType.BooleanOperator, words[i]));
+            }
             else if(IsParenthesis(words[i]))
             {
-                lineTokens.Add(new Token(Token.TokenType.Parenthesis, words[i]));
+                lineTokens.Add(Token.CreateToken(Token.TokenType.Parenthesis, words[i]));
             }
             else if(IsSeparator(words[i]))
             {
@@ -101,11 +106,14 @@ public class Lexer
                 lineTokens.Add(new VariableToken(words[i]));
             }
         }
-
-        return new TokenLineBuilder().PushToken(lineTokens).Build();
+        
+        if(words.Length > 0)
+            lineTokens.Add(new EndOfLineToken());
+        
+        return lineTokens;
     }
 
-    private static bool ParseBoolean(string value)
+    public static bool ParseBoolean(string value)
     {
         return value.Equals("vrai");
     }
@@ -127,11 +135,6 @@ public class Lexer
             }
         }
         return false;
-    }
-
-    private static bool IsStructureToken(string word)
-    {
-        return structureTokens.Contains(word);
     }
 
     private static bool IsOperator(string word)
@@ -199,6 +202,11 @@ public class Lexer
         return false;
     }
 
+    private static bool IsBooleanOperator(string word)
+    {
+        return Syntax.booleanOperators.Contains(word);
+    }
+    
     private static bool ContainSeparator(string word)
     {
         foreach (char c in word)
@@ -221,156 +229,37 @@ public class Lexer
         return int.TryParse(word, out _);
     }
 
-    private static StructureToken GetStructureToken(string token)
+    public class NewTokenLineBuilder
     {
-        return (StructureToken)Array.IndexOf(structureTokens, token);
-    }
-
-    private static TokenizeContext.BlockEmplacement GetBlockEmplacement(StructureToken token)
-    {
-        switch (token)
-        {
-            case StructureToken.ProgramStart:
-                return TokenizeContext.BlockEmplacement.none;
-            case StructureToken.VariableDeclaration:
-                return TokenizeContext.BlockEmplacement.variableDeclaration;
-            case StructureToken.CodeBlockStart:
-                return TokenizeContext.BlockEmplacement.codeBlock;
-            case StructureToken.CodeBlockEnd:
-                return TokenizeContext.BlockEmplacement.none;
-            default:
-                throw new ArgumentOutOfRangeException(nameof(token), token, null);
-        }
-    }
-    
-    public class TokenizeContext
-    {
-        public enum BlockEmplacement
-        {
-            none,
-            variableDeclaration,
-            codeBlock
-        }
-        
-        public BlockEmplacement blockEmplacement = BlockEmplacement.none;
-        public string AlgorithmName = "";
-        public string[] variables;
-    }
-    
-    public class TokenLineBuilder
-    {
-        public readonly GroupToken rootTokens;
+        public readonly GroupToken rootGroup;
         public GroupToken CurrentGroup;
-        public bool IndexMode = false;
-        public bool Indexed = false;
-        
-        public TokenLineBuilder()
+
+        public NewTokenLineBuilder()
         {
-            rootTokens = new GroupToken();
-            CurrentGroup = rootTokens;
+            rootGroup = new GroupToken();
+            CurrentGroup = rootGroup;
         }
 
-        public TokenLineBuilder PushToken(Token token)
+        public Token[] Build(List<Token> tokens)
         {
-            if(token.Type == Token.TokenType.Parenthesis)
+            Token[] tokenArray = tokens.ToArray();
+
+            while (tokenArray.Length > 0)
             {
-                if ((string)token.Value == "(")
-                {
-                    GroupToken groupToken = new GroupToken();
-                    groupToken.Parent = CurrentGroup;
-                    
-                    if(CurrentGroup.Tokens.Last().Type == Token.TokenType.Variable)
-                    {
-                        CurrentGroup.Tokens.Add(new FunctionToken((string)CurrentGroup.Tokens.Last().Value, groupToken));
-                        CurrentGroup.Tokens.RemoveAt(CurrentGroup.Tokens.Count - 2);
-                    }
-                    else
-                    {
-                        CurrentGroup.Tokens.Add(groupToken);
-                    }
+                Token currentToken = tokenArray[0];
+                tokenArray = tokenArray[1..];
 
-                    CurrentGroup = groupToken;
-                }
-                else if ((string)token.Value == ")")
+                if (currentToken is ITokenLexer tokenLexer)
                 {
-                    CurrentGroup = CurrentGroup.Parent;
-                }
-
-                if ((string)token.Value == "[")
-                {
-                    GroupToken groupToken = new GroupToken();
-                    groupToken.Parent = CurrentGroup;
-                    
-                    if(CurrentGroup.Tokens.Last() is VariableToken variableToken)
-                    {
-                        variableToken.DimensionsTokens.Add(groupToken);
-                    }
-                    else
-                    {
-                        CurrentGroup.Tokens.Add(groupToken);
-                    }
-
-                    CurrentGroup = groupToken;
-                }
-                else if ((string)token.Value == "]")
-                {
-                    CurrentGroup = CurrentGroup.Parent;
-                }
-            }
-            else if (token.Type == Token.TokenType.Separator && (token.Value as string == "\'" || token.Value as string == "\""))
-            {
-                if (inQuotes)
-                {
-                    inQuotes = false;
+                    tokenLexer.Lex(ref CurrentGroup, ref tokenArray);
                 }
                 else
                 {
-                    inQuotes = true;
-                    CurrentGroup.Tokens.Add(new StringToken(""));
-                }
-            }
-            else if (token.Type == Token.TokenType.String)
-            {
-                Token lastToken = CurrentGroup.Tokens.Last();
-                lastToken.Value = (string)lastToken.Value + " " +(string)token.Value;
-            }
-            else
-            {
-                if (token.Type == Token.TokenType.Operator && token.Value as string == "=")
-                {
-                    Token lastToken = CurrentGroup.Tokens.Last();
-                    if(lastToken.Type is Token.TokenType.Operator && (lastToken.Value as string == "<" || lastToken.Value as string == ">"))
-                    {
-                        CurrentGroup.Tokens.RemoveAt(CurrentGroup.Tokens.Count - 1);
-                        CurrentGroup.Tokens.Add(Token.CreateToken(Token.TokenType.Operator, lastToken.Value as string + token.Value));
-                    }
-                    else
-                    {
-                        CurrentGroup.Tokens.Add(token);
-                    }
-                }
-                else
-                {
-                    CurrentGroup.Tokens.Add(token);
+                    CurrentGroup.Tokens.Add(currentToken);
                 }
             }
             
-            return this;
-        }
-        
-        public TokenLineBuilder PushToken(List<Token> tokens)
-        {
-            foreach (Token token in tokens)
-            {
-                PushToken(token);
-            }
-            
-            return this;
-        }
-        
-        public List<Token> Build()
-        {
-            return rootTokens.Tokens;
+            return rootGroup.Tokens.ToArray();
         }
     }
 }

@@ -12,6 +12,11 @@ public interface INodeInterpreter : INodeConverter
     public void ExecuteNode(Node node);
 }
 
+public interface ITokenLexer
+{
+    public void Lex(ref GroupToken currentGroupToken, ref Token[] nextTokens);
+}
+
 public class Token
 {
     public static Dictionary<TokenType,Dictionary<string, Func<Token>>> TokenFactoryRegister = new Dictionary<TokenType,Dictionary<string, Func<Token>>>();
@@ -28,7 +33,9 @@ public class Token
         String,
         Parenthesis,
         Function,
-        Boolean
+        Boolean,
+        BooleanOperator,
+        Special
     }
     
     public enum TokenPriority
@@ -62,6 +69,14 @@ public class Token
         RegisterTokenFactory(TokenType.Operator, ":", () => new DeclarationToken());
         RegisterTokenFactory(TokenType.Operator, "←", () => new AssignationToken());
         
+        RegisterTokenFactory(TokenType.Parenthesis, "(", () => new ParenthesisToken("("));
+        RegisterTokenFactory(TokenType.Parenthesis, ")", () => new ParenthesisToken(")"));
+        RegisterTokenFactory(TokenType.Parenthesis, "[", () => new SquareBracketToken("["));
+        RegisterTokenFactory(TokenType.Parenthesis, "]", () => new SquareBracketToken("]"));
+        
+        RegisterTokenFactory(TokenType.Separator, "\"", () => new QuoteToken("\""));
+        RegisterTokenFactory(TokenType.Separator, "'", () => new QuoteToken("'"));
+
         RegisterTokenFactory(TokenType.Operator, "+", () => new AdditionToken());
         RegisterTokenFactory(TokenType.Operator, "-", () => new SubtractionToken());
         RegisterTokenFactory(TokenType.Operator, "*", () => new MultiplicationToken());
@@ -72,6 +87,9 @@ public class Token
         RegisterTokenFactory(TokenType.Operator, "<=", () => new InferiorEqualToken());
         RegisterTokenFactory(TokenType.Operator, ">", () => new SuperiorToken());
         RegisterTokenFactory(TokenType.Operator, ">=", () => new SuperiorEqualToken());
+        
+        RegisterTokenFactory(TokenType.BooleanOperator, "ET", () => new AndOperatorToken());
+        RegisterTokenFactory(TokenType.BooleanOperator, "OU", () => new OrOperatorToken());
         
         RegisterTokenFactory(TokenType.Keyword, "Si", () => new IfToken());
         RegisterTokenFactory(TokenType.Keyword, "Sinon", () => new ElseToken());
@@ -105,6 +123,113 @@ public class Token
     {
         return !(token1 == token2);
     }
+    
+    public static Token[][] SplitTokens(Token[] tokens)
+    {
+        List<Token[]> linesTokens = new List<Token[]>();
+        int lastSeparatorIndex = -1;
+        for (int i = 0; i < tokens.Length; i++)
+        {
+            if(tokens[i].Type == TokenType.EndOfLine)
+            {
+                Token[] lineTokens = new Token[i - lastSeparatorIndex - 1];
+                Array.Copy(tokens, lastSeparatorIndex + 1, lineTokens, 0, lineTokens.Length);
+                linesTokens.Add(lineTokens);
+                lastSeparatorIndex = i;
+            }
+        }
+        
+        return linesTokens.ToArray();
+    }
+    
+    public static Token[] GetTokenTo(Token[] tokens, int startIndex, TokenType tokenType)
+    {
+        List<Token> tokensTo = new List<Token>();
+        for (int i = startIndex; i < tokens.Length; i++)
+        {
+            if(tokens[i].Type == tokenType)
+                break;
+            tokensTo.Add(tokens[i]);
+        }
+        return tokensTo.ToArray();
+    }
+}
+
+public class ParenthesisToken : Token, ITokenLexer
+{
+    public ParenthesisToken(string value) : base(TokenType.Parenthesis, value) { }
+    
+    public void Lex(ref GroupToken currentGroupToken, ref Token[] nextTokens)
+    {
+        if ((string) Value == "(")
+        {
+            GroupToken groupToken = new GroupToken();
+            groupToken.Parent = currentGroupToken;
+                    
+            if(currentGroupToken.Tokens.Last().Type == Token.TokenType.Variable)
+            {
+                currentGroupToken.Tokens.Add(new FunctionCallToken((string)currentGroupToken.Tokens.Last().Value, groupToken));
+                currentGroupToken.Tokens.RemoveAt(currentGroupToken.Tokens.Count - 2);
+            }
+            else
+            {
+                currentGroupToken.Tokens.Add(groupToken);
+            }
+
+            currentGroupToken = groupToken;
+        }
+        else if ((string) Value == ")")
+        {
+            currentGroupToken = currentGroupToken.Parent;
+        }
+    }
+}
+
+public class SquareBracketToken : Token, ITokenLexer    
+{
+    public SquareBracketToken(string value) : base(TokenType.Parenthesis, value) { }
+    
+    public void Lex(ref GroupToken currentGroupToken, ref Token[] nextTokens)
+    {
+        if ((string) Value == "[")
+        {
+            GroupToken groupToken = new GroupToken();
+            groupToken.Parent = currentGroupToken;
+                    
+            if(currentGroupToken.Tokens.Last() is VariableToken variableToken)
+            {
+                variableToken.DimensionsTokens.Add(groupToken);
+            }
+            else
+            {
+                currentGroupToken.Tokens.Add(groupToken);
+            }
+
+            currentGroupToken = groupToken;
+        }
+        else if ((string) Value == "]")
+        {
+            currentGroupToken = currentGroupToken.Parent;
+        }
+    }
+}
+
+public class QuoteToken : Token, ITokenLexer
+{
+    public QuoteToken(string value) : base(TokenType.Separator, value) { }
+
+    public void Lex(ref GroupToken currentGroupToken, ref Token[] nextTokens)
+    {
+        int i = 0;
+        while (i < nextTokens.Length && nextTokens[i] is not QuoteToken && nextTokens[i].Value as string != Value as string)
+        {
+            i++;
+        }
+        
+        string value = string.Join("", nextTokens[..i].Select(t => t.Value as string));
+        currentGroupToken.Tokens.Add(new StringToken(value));
+        nextTokens = nextTokens[(i + 1)..];
+    }
 }
 
 public class GroupToken : Token
@@ -128,7 +253,60 @@ public class GroupToken : Token
     }
 }
 
-public class FunctionToken : Token, INodeConverter
+public class FunctionDeclarationToken : Token, INodeConverter, ITokenLexer
+{
+    public struct Parameter
+    {
+        private bool reference;
+        private string name;
+        private Type type;
+    }
+    
+    public TokenPriority Priority
+    {
+        get => TokenPriority.Highest; 
+        set => throw new NotImplementedException();
+    }
+
+    public string Name
+    {
+        get => Value as string;
+        set => Value = value;
+    }
+    
+    public TypeToken ReturnType { get; set; }
+
+    public FunctionDeclarationToken(string name) : base(TokenType.Keyword, name) { }
+
+
+    public Node ConvertToNodeTree(Token[] leftTokens, Token[] rightTokens)
+    {
+        throw new NotImplementedException();
+    }
+
+    public void ExecuteNode(Node node, NodeInterpreter interpreter)
+    {
+        
+    }
+
+    public void Lex(ref GroupToken currentGroupToken, ref Token[] nextTokens)
+    {
+        VariableToken functionName = nextTokens[0] as VariableToken;
+        GroupToken parametersGroup = nextTokens[1] as GroupToken;
+        if(nextTokens[2].Value != ":")
+            throw new Exception("Expected ':' after function parameters");
+        Token[] typeTokens = GetTokenTo(nextTokens, 3, TokenType.EndOfLine);
+        ReturnType = NodeInterpreter.GetAlgoType(typeTokens);
+        
+    }
+
+    public Parameter[] ParseParameters(Token[] tokens)
+    {
+        throw new NotImplementedException();
+    }
+}
+
+public class FunctionCallToken : Token, INodeConverter
 {
     public string Name
     {
@@ -148,7 +326,7 @@ public class FunctionToken : Token, INodeConverter
         set => throw new NotImplementedException();
     }
     
-    public FunctionToken(string name, GroupToken arguments) : base(TokenType.Function, null)
+    public FunctionCallToken(string name, GroupToken arguments) : base(TokenType.Function, null)
     {
         Value = new Tuple<string, GroupToken>(name, arguments);
         
@@ -198,40 +376,7 @@ public class DeclarationToken : Token, INodeConverter
     {
         Node node = new Node();
         node.Token = this;
-        if(type.Length == 1)
-        {
-            node.Children.Add(new Node(){Token = new TypeToken(NodeInterpreter.GetAlgoType(type[0].Value as string))});
-        }
-        else if (type.Length == 3)
-        {
-            if(type[1].Value as string != "de") throw new ArgumentException("Invalid type declaration");
-            switch (type[0].Value as string)
-            {
-                case "chaine":
-                case "chaîne":
-                    switch (type[2].Value as string)
-                    {
-                        case "caractères":
-                        case "caracteres":
-                        case "caractère":
-                        case "caractere":
-                            node.Children.Add(new Node(){Token = new TypeToken(NodeInterpreter.GetAlgoType("string"))});
-                            break;
-                        default:
-                            throw new ArgumentException("Invalid type declaration");
-                    }
-                    break;
-                case "tableau":
-                    TypeToken typeToken = new TypeToken(NodeInterpreter.GetAlgoType(type[2].Value as string));
-                    typeToken.IsArray = true;
-                    node.Children.Add(new Node(){Token = typeToken});
-                    break;
-            }
-        }
-        else
-        {
-            throw new Exception("Type declaration is not valid");
-        }
+        node.Children.Add(new Node(){Token = NodeInterpreter.GetAlgoType(type)});
 
         for (int i = 0; i < variables.Length; i++)
         {
@@ -302,21 +447,7 @@ public class AssignationToken : Token, INodeConverter
         {
             throw new Exception("Assignation operation must have only one assigned variable");
         }
-        if(operation.Length == 1)
-        {
-            if (operation[0].Type == TokenType.Group)
-            {
-                node.Children.Add(NodeConverter.CreateNodeTree((operation[0] as GroupToken).Tokens.ToArray()));
-            }
-            else
-            {
-                node.Children.Add(new Node() { Token = operation[0] });
-            }
-        }
-        else
-        {
-            node.Children.Add(NodeConverter.CreateNodeTree(operation));
-        }
+        node.Children.Add(NodeConverter.CreateNodeTree(operation));
 
         return node;
     }
@@ -374,6 +505,7 @@ public class VariableToken : Token, INodeConverter
 
     public Node ConvertToNodeTree(Token[] leftTokens, Token[] rightTokens)
     {
+        PrepareDimensionsIfPresent();
         return new Node(){Token = this};
     }
 
@@ -545,6 +677,11 @@ public class ElseToken : Token, INodeConverter
             interpreter.SkipToEnd();
         }
     }
+}
+
+public class EndOfLineToken : Token
+{
+    public EndOfLineToken() : base(TokenType.EndOfLine, "") { }
 }
 
 #region ArithmeticOperators
@@ -757,7 +894,6 @@ public class WhileToken : Token, INodeConverter
 
     public Node ConvertToNodeTree(Token[] leftTokens, Token[] rightTokens)
     {
-        //todo: verify condition
         if (rightTokens[0] == new Token(TokenType.Keyword, "que"))
         {
             int index = 1;
@@ -893,7 +1029,7 @@ public class EndToken : Token, INodeConverter
     {
         if (node.Children.Count > 0)
         {
-            switch (node.Children[0].Token.Value as string)
+            switch ((node.Children[0].Token.Value as string).ToLower())
             {
                 case "pour":
                     interpreter.JumpToLastLoop();
@@ -1041,6 +1177,10 @@ public class SuperiorToken : Token, INodeConverter
         {
             return (float)a > (int)b;
         }
+        if(a is char && b is char)
+        {
+            return (char) a > (char) b;
+        }
         throw new Exception("Unable to compare values");
     }
 }
@@ -1091,11 +1231,15 @@ public class InferiorToken : Token, INodeConverter
         {
             return (float)a < (int)b;
         }
+        if(a is char && b is char)
+        {
+            return (char) a < (char) b;
+        }
         throw new Exception("Unable to compare values");
     }
 }
 
-public class EqualToken : Token, INodeConverter
+public class EqualToken : Token, INodeConverter, ITokenLexer
 {
     public TokenPriority Priority
     {
@@ -1144,11 +1288,33 @@ public class EqualToken : Token, INodeConverter
         {
             return (string)a == (string)b;
         }
+        if(a is char && b is char)
+        {
+            return (char) a == (char) b;
+        }
         if (a.GetType() != b.GetType())
         {
             return false;
         }
         throw new Exception("Unable to compare values");
+    }
+
+    public void Lex(ref GroupToken currentGroupToken, ref Token[] nextTokens)
+    {
+        if (currentGroupToken.Tokens.Last() is InferiorToken)
+        {
+            currentGroupToken.Tokens.RemoveAt(currentGroupToken.Tokens.Count - 1);
+            currentGroupToken.Tokens.Add(new InferiorEqualToken());
+        }
+        else if (currentGroupToken.Tokens.Last() is SuperiorToken)
+        {
+            currentGroupToken.Tokens.RemoveAt(currentGroupToken.Tokens.Count - 1);
+            currentGroupToken.Tokens.Add(new SuperiorEqualToken());
+        }
+        else
+        {
+            currentGroupToken.Tokens.Add(this);
+        }
     }
 }
 
@@ -1215,6 +1381,66 @@ public class InferiorEqualToken : Token, INodeConverter
     private static bool IsInferiorOrEqual(object a, object b)
     {
         return InferiorToken.IsInferior(a,b) || EqualToken.AreEqual(a,b);
+    }
+}
+
+#endregion
+
+#region BooleanOperators
+
+public class AndOperatorToken : Token, INodeConverter
+{
+    public TokenPriority Priority
+    {
+        get => TokenPriority.Highest; 
+        set => throw new NotImplementedException();
+    }
+
+    public AndOperatorToken() : base(TokenType.BooleanOperator, "ET") { }
+
+    public Node ConvertToNodeTree(Token[] leftTokens, Token[] rightTokens)
+    {
+        Node node = new Node(){Token = this};
+        node.Children.Add(NodeConverter.CreateNodeTree(leftTokens));
+        node.Children.Add(NodeConverter.CreateNodeTree(rightTokens));
+        return node;
+    }
+
+    public void ExecuteNode(Node node, NodeInterpreter interpreter)
+    {
+        interpreter.ExecuteNode(node.Children[0]);
+        interpreter.ExecuteNode(node.Children[1]);
+        bool rightValue = interpreter.Pop<bool>();
+        bool leftValue = interpreter.Pop<bool>();
+        interpreter.Push(leftValue && rightValue);
+    }
+}
+
+public class OrOperatorToken : Token, INodeConverter
+{
+    public TokenPriority Priority
+    {
+        get => TokenPriority.Highest; 
+        set => throw new NotImplementedException();
+    }
+
+    public OrOperatorToken() : base(TokenType.BooleanOperator, "OU") { }
+
+    public Node ConvertToNodeTree(Token[] leftTokens, Token[] rightTokens)
+    {
+        Node node = new Node(){Token = this};
+        node.Children.Add(NodeConverter.CreateNodeTree(leftTokens));
+        node.Children.Add(NodeConverter.CreateNodeTree(rightTokens));
+        return node;
+    }
+
+    public void ExecuteNode(Node node, NodeInterpreter interpreter)
+    {
+        interpreter.ExecuteNode(node.Children[0]);
+        interpreter.ExecuteNode(node.Children[1]);
+        bool rightValue = interpreter.Pop<bool>();
+        bool leftValue = interpreter.Pop<bool>();
+        interpreter.Push(leftValue || rightValue);
     }
 }
 
